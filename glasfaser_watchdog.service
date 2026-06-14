@@ -1,0 +1,13 @@
+[Unit]
+Description=Glasfaser Watchdog – VLAN-Reset für 1&1 Glasfaser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=YOURUSER
+EnvironmentFile=/home/YOURUSER/glasfaser-watchdog/.env
+Environment=PYTHONPATH=/home/YOURUSER/.local/lib/python3.13/site-packages
+ExecStart=/usr/bin/python3 /home/YOURUSER/glasfaser-watchdog/glasfaser_watchdog.py
+StandardOutput=journal
+StandardError=journal

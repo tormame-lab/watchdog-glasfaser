@@ -1,0 +1,19 @@
+# Secrets – NIEMALS committen / NEVER commit
+.env
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Debug-Screenshots
+*.png
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
