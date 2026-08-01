@@ -19,6 +19,15 @@ Der Glasfaser Watchdog läuft auf einem Raspberry Pi und überwacht kontinuierli
 
 Ein systemd-Timer startet das Skript alle 5 Minuten. Wenn die Verbindung aktiv ist, beendet sich das Skript sofort ohne Eingriff.
 
+#### Backoff bei unerwarteten Fehlern
+
+Nicht jeder Ausfall lässt sich durch einen VLAN-Reset beheben. Zwei Fälle werden gesondert behandelt, damit **nicht alle 5 Minuten** vergeblich versucht (und alarmiert) wird:
+
+- **WAN-Verbindung fehlt** – ist die konfigurierte Verbindung (`WAN_NAME`) gar nicht mehr in der Router-Übersicht (z. B. Konfig gelöscht), hilft kein Reset. Der Watchdog sendet **einmalig** eine Telegram-Aufforderung zur manuellen Prüfung.
+- **Reset wiederholt erfolglos** – schlägt der VLAN-Reset `MAX_RESET_FAILURES`-mal in Folge fehl (mögliches Leitungsproblem), wird ebenfalls alarmiert.
+
+In beiden Fällen pausiert der Watchdog anschließend für `ALERT_COOLDOWN_SEC` (Standard 6 h): kein weiterer Reset, kein Wiederhol-Alarm. Der günstige IP-Check läuft weiter – sobald die Verbindung zurück ist, wird der Backoff automatisch aufgehoben und eine Entwarnung gesendet.
+
 ### Voraussetzungen
 
 - Raspberry Pi (getestet auf **Raspberry Pi 5** mit Raspberry Pi OS)
@@ -58,6 +67,9 @@ Alle Einstellungen erfolgen über die `.env`-Datei (niemals committen!):
 | `TELEGRAM_TOKEN` | – | Telegram Bot-Token (leer = deaktiviert) |
 | `TELEGRAM_CHAT` | – | Telegram Chat-ID für Benachrichtigungen |
 | `LOG_FILE` | `glasfaser_watchdog.log` | Pfad zur Logdatei |
+| `ALERT_COOLDOWN_SEC` | `21600` | Backoff-Sperrzeit nach unerwartetem Fehler (Sek., Standard 6 h) |
+| `MAX_RESET_FAILURES` | `2` | Fehl-Resets in Folge bis Backoff + Alarm |
+| `STATE_FILE` | `glasfaser_watchdog_state.json` | Pfad zur Laufzeit-Statusdatei |
 
 #### Telegram-Bot einrichten
 
@@ -115,6 +127,15 @@ The Glasfaser Watchdog runs on a Raspberry Pi and continuously monitors the fibe
 
 A systemd timer runs the script every 5 minutes. If the connection is active, the script exits immediately without any action.
 
+#### Backoff on unexpected errors
+
+Not every outage can be fixed by a VLAN reset. Two cases are handled specially so the script does **not** keep retrying (and alerting) every 5 minutes:
+
+- **WAN connection missing** – if the configured connection (`WAN_NAME`) is no longer present in the router overview (e.g. config deleted), a reset cannot help. The watchdog sends a **single** Telegram request to check manually.
+- **Reset repeatedly unsuccessful** – if the VLAN reset fails `MAX_RESET_FAILURES` times in a row (possible line issue), it alerts as well.
+
+In both cases the watchdog then pauses for `ALERT_COOLDOWN_SEC` (default 6 h): no further reset, no repeated alerts. The cheap IP check keeps running – once the connection is back, the backoff is lifted automatically and an all-clear is sent.
+
 ### Prerequisites
 
 - Raspberry Pi (tested on **Raspberry Pi 5** with Raspberry Pi OS)
@@ -154,6 +175,9 @@ All settings are stored in the `.env` file (never commit this file!):
 | `TELEGRAM_TOKEN` | – | Telegram bot token (empty = disabled) |
 | `TELEGRAM_CHAT` | – | Telegram chat ID for notifications |
 | `LOG_FILE` | `glasfaser_watchdog.log` | Path to log file |
+| `ALERT_COOLDOWN_SEC` | `21600` | Backoff pause after an unexpected error (sec, default 6 h) |
+| `MAX_RESET_FAILURES` | `2` | Consecutive failed resets before backoff + alert |
+| `STATE_FILE` | `glasfaser_watchdog_state.json` | Path to the runtime state file |
 
 #### Setting up a Telegram bot
 

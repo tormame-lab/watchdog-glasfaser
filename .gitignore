@@ -4,6 +4,9 @@
 # Logs
 *.log
 
+# Backoff-/Alarm-Status (Laufzeit) / runtime backoff state
+glasfaser_watchdog_state.json
+
 # Python
 __pycache__/
 *.pyc

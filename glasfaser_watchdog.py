@@ -4,10 +4,18 @@ Glasfaser Watchdog – Stellt sicher dass die 1&1 Glasfaser-Verbindung aktiv ist
 Wenn die externe WAN-IP nicht auf dem konfigurierten GW_PREFIX liegt, wird die
 VLAN-ID am Router zurückgesetzt: deaktivieren → aktivieren.
 
+Bei einem UNERWARTETEN Fehler (z. B. wenn die WAN-Verbindung komplett aus der
+Router-Übersicht verschwunden ist) oder wenn der VLAN-Reset wiederholt nicht
+hilft, wird NICHT alle paar Minuten neu versucht. Stattdessen fordert der
+Watchdog per Telegram einmalig zur manuellen Prüfung auf und pausiert danach für
+ALERT_COOLDOWN_SEC (Backoff). Der günstige IP-Check läuft weiter, damit eine
+Erholung sofort erkannt und der Backoff aufgehoben wird.
+
 Router: TP-Link Archer NX600 v2.0
 ISP:    Deutsche Glasfaser / 1&1
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -37,6 +45,14 @@ LOG_FILE        = os.environ.get("LOG_FILE", os.path.join(os.path.dirname(os.pat
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT   = os.environ.get("TELEGRAM_CHAT", "")
 
+# ─── Backoff / Alarm-Steuerung ────────────────────────────────────────────────
+# STATE_FILE hält Fehlerzähler + Zeitstempel persistent, damit bei einem
+# unerwarteten Fehler nicht endlos alle paar Minuten neu versucht (und alarmiert)
+# wird. Alle Werte über Umgebungsvariablen überschreibbar.
+STATE_FILE         = os.environ.get("STATE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "glasfaser_watchdog_state.json"))
+ALERT_COOLDOWN_SEC = int(os.environ.get("ALERT_COOLDOWN_SEC", str(6 * 3600)))  # Sperrzeit für erneute Versuche + Wiederhol-Alarme
+MAX_RESET_FAILURES = int(os.environ.get("MAX_RESET_FAILURES", "2"))            # nach so vielen Fehl-Resets in Folge: Backoff + Alarm
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -59,6 +75,43 @@ def send_telegram(text: str) -> None:
         urllib.request.urlopen(url, data=data, timeout=10)
     except Exception as e:
         log.warning("Telegram-Benachrichtigung fehlgeschlagen: %s", e)
+
+
+# ─── Backoff-Status (persistent) ──────────────────────────────────────────────
+
+class WanConnectionMissing(Exception):
+    """Die erwartete WAN-Verbindung existiert nicht (mehr) in der Router-Übersicht."""
+
+
+def load_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(state: dict) -> None:
+    # Atomar schreiben (temp + os.replace), damit ein paralleler load_state() nie
+    # eine halb geschriebene Datei liest und fälschlich {} zurückgibt.
+    try:
+        tmp = f"{STATE_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        log.warning("Backoff-Status speichern fehlgeschlagen: %s", e)
+
+
+def clear_state() -> None:
+    try:
+        os.remove(STATE_FILE)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("Backoff-Status löschen fehlgeschlagen: %s", e)
 
 
 # ─── Netzwerk-Prüfung ────────────────────────────────────────────────────────
@@ -133,7 +186,13 @@ def click_edit(page) -> None:
     """Klickt das Bearbeiten-Icon (span.edit-modify-icon) in der WAN-Zeile."""
     log.info("Suche WAN-Verbindung '%s' und öffne Edit-Formular", WAN_NAME)
     row = page.locator("tr").filter(has_text=WAN_NAME).first
-    row.wait_for(timeout=10_000)
+    try:
+        row.wait_for(timeout=10_000)
+    except PWTimeout:
+        # WAN-Verbindung fehlt in der Übersicht → anderer als der erwartete Fehler.
+        raise WanConnectionMissing(
+            f"WAN-Verbindung '{WAN_NAME}' nicht in der Router-Übersicht gefunden"
+        )
     row.locator("span.edit-modify-icon").click()
     page.wait_for_load_state("networkidle", timeout=15_000)
     log.info("Edit-Formular geöffnet.")
@@ -214,15 +273,47 @@ def reset_vlan(page) -> None:
 
 # ─── Hauptprogramm ───────────────────────────────────────────────────────────
 
+def _enter_backoff(state: dict, now: float, reason: str, message: str) -> None:
+    """Setzt Backoff-Fenster und sendet höchstens einmal pro Cooldown eine Nachricht."""
+    if now - state.get("last_alert_ts", 0) >= ALERT_COOLDOWN_SEC:
+        send_telegram(message)
+        state["last_alert_ts"] = now
+    else:
+        log.info("Alarm unterdrückt (Cooldown aktiv) – Grund: %s", reason)
+    state["suppress_until"] = now + ALERT_COOLDOWN_SEC
+    state["reason"] = reason
+    save_state(state)
+
+
 def main() -> None:
     log.info("=== Glasfaser Watchdog (%s) ===", datetime.now().isoformat())
 
     if is_glasfaser_active():
         log.info("Glasfaser-Gateway aktiv – kein Eingriff nötig.")
+        # Erholung erkannt → Backoff-/Fehlerstatus zurücksetzen
+        if load_state():
+            log.info("Verbindung wieder aktiv – hebe Backoff auf.")
+            send_telegram("✅ Glasfaser wieder aktiv – Watchdog-Backoff aufgehoben.")
+            clear_state()
+        return
+
+    state = load_state()
+    now = time.time()
+
+    # Backoff aktiv? Dann keinen weiteren Reset – nur still beenden (IP-Check lief bereits).
+    suppress_until = state.get("suppress_until", 0)
+    if now < suppress_until:
+        mins = int((suppress_until - now) / 60)
+        log.warning(
+            "Backoff aktiv (Grund: %s) – überspringe VLAN-Reset, manuelle Prüfung "
+            "ausstehend (noch ~%d min).", state.get("reason", "?"), mins
+        )
         return
 
     log.info("Glasfaser-Gateway NICHT aktiv – starte Router-Konfiguration.")
-    send_telegram("⚠️ Glasfaser nicht aktiv – starte VLAN-Reset am Router…")
+    # "Starte Reset"-Hinweis nur einmal pro Fehler-Serie (kein Spam pro Lauf)
+    if state.get("fail_count", 0) == 0:
+        send_telegram("⚠️ Glasfaser nicht aktiv – starte VLAN-Reset am Router…")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -235,6 +326,24 @@ def main() -> None:
         try:
             login(page)
             reset_vlan(page)
+        except WanConnectionMissing as e:
+            # UNERWARTETER Fehler: Verbindung fehlt → per VLAN-Reset nicht reparierbar.
+            log.error("Unerwarteter Fehler – manuelle Prüfung nötig: %s", e)
+            try:
+                page.screenshot(path="/tmp/glasfaser_watchdog_error.png")
+                log.info("Fehler-Screenshot: /tmp/glasfaser_watchdog_error.png")
+            except Exception:
+                pass
+            browser.close()
+            _enter_backoff(
+                state, now, "wan_missing",
+                f"❗ Watchdog: WAN-Verbindung '{WAN_NAME}' ist im Router NICHT vorhanden.\n"
+                f"Das ist ein ANDERER als der erwartete Fehler – ein automatischer "
+                f"VLAN-Reset hilft hier nicht (Router-Konfig fehlt oder Leitungsproblem).\n"
+                f"➡️ Bitte manuell am Router ({ROUTER_URL}) nachschauen.\n"
+                f"Automatik für {ALERT_COOLDOWN_SEC // 3600}h ausgesetzt."
+            )
+            return
         except Exception as e:
             log.error("Fehler bei der Router-Konfiguration: %s", e)
             try:
@@ -243,7 +352,18 @@ def main() -> None:
             except Exception:
                 pass
             browser.close()
-            sys.exit(1)
+            state["fail_count"] = state.get("fail_count", 0) + 1
+            if state["fail_count"] >= MAX_RESET_FAILURES:
+                _enter_backoff(
+                    state, now, "reset_error",
+                    f"❌ Watchdog: VLAN-Reset {state['fail_count']}x in Folge fehlgeschlagen "
+                    f"({e}).\nMöglicherweise ein Leitungs-/Router-Problem statt der üblichen "
+                    f"PPPoE-Trennung.\n➡️ Bitte manuell nachschauen. "
+                    f"Automatik für {ALERT_COOLDOWN_SEC // 3600}h ausgesetzt."
+                )
+            else:
+                save_state(state)
+            return
 
         browser.close()
 
@@ -254,14 +374,28 @@ def main() -> None:
         ip = get_external_ip()
         log.info("Glasfaser aktiv (externe IP). Reparatur erfolgreich.")
         send_telegram(f"✅ Glasfaser wieder aktiv! Externe IP: {ip}")
+        clear_state()
     else:
         ip = get_external_ip()
         log.error(
             "Glasfaser nach %ds noch nicht aktiv. Externe IP aktuell: %s",
             CHECK_WAIT_SEC, ip
         )
-        send_telegram(f"❌ VLAN-Reset fehlgeschlagen – Glasfaser nach {CHECK_WAIT_SEC}s noch nicht aktiv. IP: {ip}")
-        sys.exit(2)
+        # Reset lief technisch durch, brachte aber keine Verbindung → als Fehlversuch werten.
+        state["fail_count"] = state.get("fail_count", 0) + 1
+        if state["fail_count"] >= MAX_RESET_FAILURES:
+            _enter_backoff(
+                state, now, "no_connection_after_reset",
+                f"❌ VLAN-Reset {state['fail_count']}x ohne Erfolg – Glasfaser weiterhin "
+                f"inaktiv (IP: {ip}). Evtl. Leitungsproblem.\n"
+                f"➡️ Bitte manuell prüfen. Automatik für {ALERT_COOLDOWN_SEC // 3600}h ausgesetzt."
+            )
+        else:
+            send_telegram(
+                f"❌ VLAN-Reset fehlgeschlagen – Glasfaser nach {CHECK_WAIT_SEC}s "
+                f"noch nicht aktiv. IP: {ip}. Neuer Versuch beim nächsten Lauf."
+            )
+            save_state(state)
 
 
 if __name__ == "__main__":
