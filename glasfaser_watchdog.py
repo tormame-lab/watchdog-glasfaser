@@ -33,6 +33,7 @@ auf Schadensbegrenzung und Nachweisbarkeit (D/E/F), nicht auf Klick-Vermeidung.
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -90,7 +91,7 @@ CHECK_POLL_SEC  = _env_int("CHECK_POLL_SEC", 15)
 #
 # curl wird mit -4 aufgerufen, und das ist NICHT optional: Der Anschluss hat
 # IPv6, und ifconfig.me wie icanhazip.com antworten dann mit der IPv6-Adresse
-# (auf diesem Anschluss nachgemessen). Die fällt durch die IPv4-Prüfung und die
+# (am 2026-08-08 nachgemessen). Die fällt durch die IPv4-Prüfung und die
 # ganze Erkennung hängt ohnehin am IPv4-Präfix GW_PREFIX. Ohne -4 wäre der
 # Rückfall also wirkungslos – er würde genau dann nichts liefern, wenn er
 # gebraucht wird.
@@ -388,12 +389,56 @@ def save_forensics(page, context, tag: str) -> None:
 
 # ─── (F) Config-Backup ───────────────────────────────────────────────────────
 
+def _fingerprint(value: str) -> str:
+    """Kurzer, nur lokal vergleichbarer Fingerabdruck eines redigierten Werts.
+
+    Zweck: Beim Vergleich von pre-toggle- und post-toggle-Backup soll erkennbar
+    bleiben, ob der Router einen Wert VERÄNDERT hat – am 2026-08-01 stand an
+    Stelle des 1&1-Eintrags plötzlich ein „Starlink"-Eintrag. Ohne Fingerabdruck
+    sähen zwei verschiedene Werte gleicher Länge identisch aus.
+
+    Gesalzen mit der machine-id, damit der Abdruck außerhalb dieses Geräts
+    nichts preisgibt: Das Format des PPPoE-Benutzernamens ist bekannt, ein
+    ungesalzener Kurz-Hash ließe sich sonst gegen eine überschaubare
+    Kandidatenliste durchprobieren.
+    """
+    try:
+        with open("/etc/machine-id", "r", encoding="utf-8") as fh:
+            salz = fh.read().strip()
+    except Exception:
+        salz = "kein-salz"
+    return hashlib.sha256((salz + value).encode("utf-8")).hexdigest()[:8]
+
+
+# Identitätsfelder: Der PPPoE-Benutzername ist kein Passwort, aber die zweite
+# Hälfte der Zugangsdaten und identifiziert den Anschluss eindeutig. Er hat in
+# Backups und Forensik-Dumps nichts verloren – zumal diese Dateien der einzige
+# Grund sind, warum man sie jemandem schickt (Support, Bugreport).
+#
+# Wiederherstellbarkeit geht dadurch nicht verloren: Das Passwort ist ohnehin
+# redigiert, das Backup taugte also nie zum Wiederanlegen der Verbindung. Dafür
+# sind die 1&1-Zugangsdaten aus dem Control-Center nötig.
+#
+# WICHTIG: Der Rückgabewert darf NIE leer sein. verify_wan_intact() prüft mit
+# `if f.get("value")`, ob ein Identitätsfeld befüllt ist – ein leerer Platzhalter
+# würde dort als „Konfiguration zerstört" gelesen und den Kill-Switch auslösen.
+IDENTITY_FIELD_PATTERN = r"(user|account|login|kennung)"
+# Auffangnetz für unbekannte Feldnamen anderer Firmware: Ein Wert in Kontoform
+# (etwas@etwas.tld) in einem Textfeld eines WAN-Formulars ist praktisch immer
+# eine Zugangskennung.
+IDENTITY_VALUE_PATTERN = r"^\S+@\S+\.\S+$"
+
+
 def _redact(field_name: str, field_type: str, value: str) -> str:
-    """PPPoE-Passwort & Co. niemals in Backups oder Forensik-Dumps schreiben."""
+    """PPPoE-Passwort, Benutzername & Co. niemals in Backups oder Dumps schreiben."""
     if not value:
         return value
     if field_type == "password" or re.search(r"(pass|pwd|secret|key|token)", field_name, re.I):
         return f"<redacted:{len(value)}chars>"
+    if re.search(IDENTITY_FIELD_PATTERN, field_name, re.I) or (
+        field_type == "text" and re.match(IDENTITY_VALUE_PATTERN, value)
+    ):
+        return f"<redacted:{len(value)}chars:{_fingerprint(value)}>"
     return value
 
 

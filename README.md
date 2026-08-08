@@ -178,11 +178,12 @@ Hilfreich für eine Rückfrage: Router-Modell und Firmware-Stand, der passende A
 > - **Logdatei und Dry-Run-Ausgabe** sind unbedenklich: Es werden nur Feldnamen
 >   protokolliert (`['connname', 'username']`), keine Werte. Weder Passwort noch
 >   PPPoE-Benutzername stehen darin. Enthalten ist allerdings die externe IP.
-> - **Config-Backups** (`FORENSIC_DIR/wan-config/*.json`) **nicht weitergeben**:
->   Passwortfelder sind geschwärzt (`<redacted:Nchars>`), der **PPPoE-Benutzername steht
->   im Klartext**.
-> - **Screenshots und DOM-Kopien** aus dem Forensik-Ordner zeigen die Router-Oberfläche
->   samt Benutzername — vor dem Teilen schwärzen.
+> - **Config-Backups** (`FORENSIC_DIR/wan-config/*.json`): Passwort **und**
+>   PPPoE-Benutzername sind geschwärzt. Der Benutzername behält Länge und einen nur
+>   lokal vergleichbaren Fingerabdruck (`<redacted:27chars:a1b2c3d4>`), damit beim
+>   Vergleich zweier Backups erkennbar bleibt, ob der Router einen Wert *verändert* hat.
+> - **Screenshots, DOM-Kopien und Playwright-Traces** aus dem Forensik-Ordner werden
+>   *nicht* geschwärzt und können den Benutzernamen enthalten — vor dem Teilen prüfen.
 
 ---
 
@@ -360,10 +361,12 @@ Useful when asking: router model and firmware build, the relevant excerpt from
 > - **Log file and dry-run output** are safe to share: only field *names* are logged
 >   (`['connname', 'username']`), never values. Neither the password nor the PPPoE
 >   username appears. Your external IP does.
-> - **Do not share config backups** (`FORENSIC_DIR/wan-config/*.json`): password fields
->   are redacted (`<redacted:Nchars>`), but the **PPPoE username is in clear text**.
-> - **Screenshots and DOM dumps** from the forensics folder show the router UI including
->   the username — redact before sharing.
+> - **Config backups** (`FORENSIC_DIR/wan-config/*.json`): both the password and the
+>   PPPoE username are redacted. The username keeps its length plus a fingerprint that is
+>   only comparable on this machine (`<redacted:27chars:a1b2c3d4>`), so comparing two
+>   backups still reveals whether the router *changed* a value.
+> - **Screenshots, DOM dumps and Playwright traces** from the forensics folder are *not*
+>   redacted and may contain the username — check before sharing.
 
 ---
 
