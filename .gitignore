@@ -20,3 +20,15 @@ __pycache__/
 .idea/
 *.swp
 *~
+
+# Forensik: Screenshots, DOM-Kopien, Playwright-Traces und WAN-Config-Backups.
+# Die Config-Backups enthalten die komplette Router-Konfiguration – Passwortfelder
+# sind zwar geschwaerzt, aber Benutzername und Anschlusskennung stehen drin.
+forensik/
+*.html
+*.zip
+wan-config/
+glasfaser_watchdog_disabled
+
+# Private Notizen – gehoeren nicht ins oeffentliche Repo
+1und1_wan_settings.md

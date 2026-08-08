@@ -3,9 +3,23 @@ Description=Glasfaser Watchdog alle 5 Minuten
 Requires=glasfaser_watchdog.service
 
 [Timer]
-OnBootSec=2min
+OnBootSec=5min
+
+# Der Takt bestimmt die gesamte Wartezeit bis zum Eingriff – nicht die
+# Karenzzeit. Grund: Beim ERSTEN Ausfall-Befund bricht das Skript immer ab und
+# merkt sich nur den Zeitpunkt; getoggelt wird frühestens im zweiten Lauf. Diese
+# Bestätigung ist gewollt (sie fängt Fehlmessungen der IP-Abfrage ab), kostet
+# aber genau ein Intervall.
 OnUnitActiveSec=5min
-AccuracySec=30s
+
+# ACHTUNG, Kopplung über Dateigrenzen: GRACE_PERIOD_SEC (Skript bzw. .env) MUSS
+# kleiner als OnUnitActiveSec bleiben. Sonst ist beim zweiten Lauf die Karenzzeit
+# noch nicht abgelaufen und der Toggle verschiebt sich um einen weiteren Lauf.
+# Bei 5min hier passen z. B. 120 s dort.
+
+# 10s statt 30s: Bei 5-Minuten-Takt wären 30 s Streuung 10 % und könnten die
+# Bestätigung um einen Lauf verschieben.
+AccuracySec=10s
 
 [Install]
 WantedBy=timers.target
