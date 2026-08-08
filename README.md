@@ -165,6 +165,25 @@ journalctl -u glasfaser_watchdog.service -f
 tail -f glasfaser_watchdog.log
 ```
 
+### Fragen, Fehler, Rückmeldungen
+
+Bitte über die **[Issues](../../issues)** dieses Repos — nicht per Mail. Dort sind Fragen
+und Antworten für alle sichtbar, und wer dasselbe Problem hat, findet sie wieder.
+
+Hilfreich für eine Rückfrage: Router-Modell und Firmware-Stand, der passende Auszug aus
+`glasfaser_watchdog.log` sowie die Ausgabe von `python3 glasfaser_watchdog.py --dry-run`.
+
+> ⚠️ **Was du prüfen solltest, bevor du etwas einfügst**
+>
+> - **Logdatei und Dry-Run-Ausgabe** sind unbedenklich: Es werden nur Feldnamen
+>   protokolliert (`['connname', 'username']`), keine Werte. Weder Passwort noch
+>   PPPoE-Benutzername stehen darin. Enthalten ist allerdings die externe IP.
+> - **Config-Backups** (`FORENSIC_DIR/wan-config/*.json`) **nicht weitergeben**:
+>   Passwortfelder sind geschwärzt (`<redacted:Nchars>`), der **PPPoE-Benutzername steht
+>   im Klartext**.
+> - **Screenshots und DOM-Kopien** aus dem Forensik-Ordner zeigen die Router-Oberfläche
+>   samt Benutzername — vor dem Teilen schwärzen.
+
 ---
 
 ## English
@@ -327,6 +346,24 @@ journalctl -u glasfaser_watchdog.service -f
 # Log file
 tail -f glasfaser_watchdog.log
 ```
+
+### Questions, bugs, feedback
+
+Please use this repo's **[Issues](../../issues)** rather than email — that way questions and
+answers stay visible, and the next person with the same problem can find them.
+
+Useful when asking: router model and firmware build, the relevant excerpt from
+`glasfaser_watchdog.log`, and the output of `python3 glasfaser_watchdog.py --dry-run`.
+
+> ⚠️ **Check this before pasting anything**
+>
+> - **Log file and dry-run output** are safe to share: only field *names* are logged
+>   (`['connname', 'username']`), never values. Neither the password nor the PPPoE
+>   username appears. Your external IP does.
+> - **Do not share config backups** (`FORENSIC_DIR/wan-config/*.json`): password fields
+>   are redacted (`<redacted:Nchars>`), but the **PPPoE username is in clear text**.
+> - **Screenshots and DOM dumps** from the forensics folder show the router UI including
+>   the username — redact before sharing.
 
 ---
 
