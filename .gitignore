@@ -32,3 +32,8 @@ glasfaser_watchdog_disabled
 
 # Private Notizen – gehoeren nicht ins oeffentliche Repo
 1und1_wan_settings.md
+
+# Werkzeug-Einstellungen: enthalten lokale Pfade mit dem Benutzernamen.
+# Nicht versioniert, aber eingetragen, damit ein `git add -A` sie nicht
+# versehentlich mitnimmt.
+.claude/

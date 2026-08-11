@@ -127,6 +127,27 @@ MAX_RESET_FAILURES = _env_int("MAX_RESET_FAILURES", 1)
 # im Zielszenario nicht greifen.
 POST_TOGGLE_WINDOW_SEC = _env_int("POST_TOGGLE_WINDOW_SEC", 15 * 60)
 
+# (G) Marker für einen HALB ausgeführten Toggle.
+#
+# Der Toggle besteht aus zwei Speichervorgängen: VLAN aus, 30 s warten, VLAN 7
+# wieder an. Schritt 1 ist sofort wirksam. Bricht der Lauf danach ab, bleibt die
+# Leitung ohne VLAN-ID zurück – schlechter als vor dem Eingriff, und sie kommt
+# von allein nicht wieder.
+#
+# Genau das geschah am 2026-08-11 04:57: Der Menüklick zwischen den Schritten
+# lief 30 s ins Leere (die Menüspalte war nicht gerendert), der Lauf brach ab,
+# und der generische Fehlerpfad verhängte 6 h Backoff mit der Meldung
+# „Möglicherweise ein Leitungs-/Router-Problem". Aus einem Aussetzer von einer
+# Minute wurden 2,5 Stunden Ausfall, bis von Hand eingegriffen wurde.
+#
+# Die Lehre steckt in der Unterscheidung: Backoff ist richtig, solange der
+# Watchdog den Router NICHT angefasst hat. Hat er ihn verändert und den Umbau
+# nicht zu Ende gebracht, ist Abwarten die falsche Antwort – dann muss repariert
+# werden. Dieser Marker ist das, woran der nächste Lauf beides unterscheidet.
+VLAN_OFF_KEY          = "vlan_off_since"
+VLAN_OFF_MAX_AGE_SEC  = _env_int("VLAN_OFF_MAX_AGE_SEC", 6 * 3600)
+VLAN_REPAIR_MAX_TRIES = _env_int("VLAN_REPAIR_MAX_TRIES", 3)
+
 # (D) Bestätigungs-Verifikation. Am 2026-08-07 03:46:39 meldete die Verifikation
 # eine zerstörte WAN-Config, obwohl die Zeile 11 Sekunden später (Forensik-DOM
 # und Screenshot) unverändert und mit Status „Verbunden" dastand: Die Zeilenzahl
@@ -256,6 +277,26 @@ class SelectorAmbiguous(Exception):
 
 class WanConfigDestroyed(Exception):
     """Nach dem Toggle fehlt die WAN-/PPPoE-Konfiguration oder ist unvollständig."""
+
+
+class WanVlanIncomplete(Exception):
+    """Der Toggle lief durch, die VLAN-ID steht danach aber nicht auf dem Sollwert.
+
+    Bewusst KEIN Fall für den Kill-Switch: Die Konfiguration ist vollständig, nur
+    die ID fehlt oder ist falsch. Das ist reparierbar, und der Marker (G) sorgt
+    dafür, dass der nächste Lauf es auch tut.
+    """
+
+
+class MenuUnavailable(Exception):
+    """Die Menüspalte der Router-Oberfläche ist nicht (mehr) gerendert.
+
+    Kein Selektorproblem, sondern ein Zustand der Oberfläche: Am 2026-08-11
+    04:57:43 – unmittelbar nach dem Speichern von Schritt 1 – enthielt das DOM
+    keinen sichtbaren Menüpunkt mehr (Forensik-DOM: 1 statt 2 'Netzwerk'-Knoten,
+    und der verbliebene war ein ausgeblendetes Dropdown). Auf dieser Seite ist
+    Weiterklicken aussichtslos; der Ausweg ist eine frische Sitzung.
+    """
 
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
@@ -774,26 +815,100 @@ def login(page) -> None:
     log.info("Login erfolgreich.")
 
 
+MENU_TIMEOUT_MS = _env_int("MENU_TIMEOUT_MS", 15_000)
+
+
+def _click_menu(page, label: str) -> None:
+    """Klickt einen Menüpunkt anhand seines EXAKTEN, sichtbaren Textes.
+
+    Vorher stand hier `has-text` mit `.first`. `has-text` trifft jedes Element,
+    in dessen Teilbaum die Zeichenfolge irgendwo vorkommt – auch unsichtbare.
+    Am 2026-08-11 gewann so ein ausgeblendeter Hilfetext zur Forwarding Mapping
+    Rule, in dem zufällig das Wort „Netzwerk" steht:
+
+        locator resolved to <span>Geben Sie die Forwarding Mapping Rule (FMR) …
+        element is not visible   → 30 s Timeout
+
+    `text-is` verlangt den exakten Elementtext, `:visible` schließt Reste aus dem
+    ausgeblendeten DOM aus. Damit kann ein Hilfetext nicht mehr gewinnen.
+
+    Der Kommentar an dieser Stelle lautete früher, die Menü-Selektoren dürften
+    unscharf bleiben, weil ein Menüklick nichts speichert. Das stimmt und ist
+    trotzdem der Denkfehler gewesen: Nicht der Klick ist gefährlich, sondern sein
+    FEHLSCHLAG – er unterbricht den Toggle zwischen den beiden Speichervorgängen.
+    """
+    loc = page.locator(f"a:text-is('{label}'):visible, span:text-is('{label}'):visible")
+    try:
+        loc.first.wait_for(state="visible", timeout=MENU_TIMEOUT_MS)
+    except PWTimeout:
+        raise MenuUnavailable(
+            f"Menüpunkt '{label}' ist nicht sichtbar – die Menüspalte wurde nicht "
+            f"gerendert. Auf dieser Seite ist kein Weiterkommen."
+        ) from None
+    loc.first.click(timeout=MENU_TIMEOUT_MS)
+    page.wait_for_load_state("networkidle", timeout=15_000)
+
+
 def navigate_to_internet(page) -> None:
     """Navigiert zu Erweiterte Einstellungen → Netzwerk → Internet."""
     log.info("Navigiere zu Erweiterte Einstellungen → Netzwerk → Internet")
 
-    # Navigation ist nicht destruktiv; die Menü-Selektoren sind bewusst
-    # unverändert (mehrdeutig per .first), da ein Menüklick nichts speichert.
-    page.locator(
-        "a:has-text('Erweiterte Einstellungen'), "
-        "span:has-text('Erweiterte Einstellungen')"
-    ).first.click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
-
-    page.locator("a:has-text('Netzwerk'), span:has-text('Netzwerk')").first.click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
-
-    page.locator("a:has-text('Internet')").filter(has_not_text="Provider").first.click()
-    page.wait_for_load_state("networkidle", timeout=15_000)
+    _click_menu(page, "Erweiterte Einstellungen")
+    _click_menu(page, "Netzwerk")
+    _click_menu(page, "Internet")
 
     assert_context(page, "Internet-Seite", INTERNET_MARKERS)
     log.info("Internet-Seite geöffnet.")
+
+
+def log_wan_row_state(page) -> dict:
+    """Protokolliert Status und Aktivierungs-Symbol der WAN-Zeile (rein lesend).
+
+    Offene Frage vom 2026-08-11: Beim manuellen Nachsehen war die Leitung
+    deaktiviert, im Forensik-DOM des Absturzes 2,5 h zuvor stand sie aber noch
+    auf `enable-icon`, also aktiviert. Wer sie abgeschaltet hat, ist damit nicht
+    zu klären – der Watchdog war in dieser Zeit im Backoff und hat den Router
+    nachweislich nicht angefasst.
+
+    Die Symbolik ist belegt, nicht geraten: Am 2026-08-07 trug eine Zeile mit
+    Status „Verbunden" die Klasse `enable-icon`. Eine verbundene Leitung kann
+    nicht deaktiviert sein, also benennt die Klasse den ZUSTAND, nicht die
+    angebotene Aktion. Der Nutzer hat dasselbe unabhängig bestätigt: nach dem
+    Klick wird die Glühbirne blasser und bekommt ein rotes Verbotszeichen –
+    das ist `disable-icon`.
+
+    Diese Zeile im Log macht die Frage beim nächsten Vorfall beantwortbar.
+    """
+    try:
+        info = page.evaluate(
+            """(name) => {
+                const tr = [...document.querySelectorAll('tr')]
+                    .find(r => r.textContent.includes(name));
+                if (!tr) return null;
+                const icon = tr.querySelector('.enable-icon, .disable-icon');
+                return {
+                    cells: [...tr.querySelectorAll('td')].map(c => c.textContent.trim()),
+                    icon: icon ? icon.className : null
+                };
+            }""",
+            WAN_NAME,
+        )
+    except Exception as e:
+        log.debug("WAN-Zeilenstatus nicht lesbar: %s", e)
+        return {}
+
+    if not info:
+        log.info("WAN-Zeilenstatus: keine Zeile mit '%s' gefunden.", WAN_NAME)
+        return {}
+
+    icon = info.get("icon") or ""
+    zustand = ("aktiviert"    if "enable-icon"  in icon else
+               "DEAKTIVIERT"  if "disable-icon" in icon else
+               "unbekannt")
+    log.info("WAN-Zeile '%s': %s | Aktivierung: %s (%s)",
+             WAN_NAME, " | ".join(info.get("cells") or []),
+             zustand, icon or "kein Symbol")
+    return info
 
 
 def wan_row_count(page) -> int:
@@ -1118,9 +1233,37 @@ def handle_config_destroyed(details: dict) -> None:
     )
 
 
-def reset_vlan(page) -> None:
+def _mark_vlan_off(state: dict, committed: bool) -> None:
+    """(G) Vermerkt, dass Schritt 1 gespeichert und Schritt 2 noch offen ist.
+
+    Schreibt in dasselbe state-Objekt, das main() weiterreicht – nicht in eine
+    eigene Datei und nicht über einen zweiten load_state(). Sonst würde ein
+    späterer save_state(state) aus einem Fehlerpfad von main() den Marker mit
+    einem veralteten Abzug wieder überschreiben, und zwar ausgerechnet dann,
+    wenn er gebraucht wird.
+    """
+    if committed:
+        state[VLAN_OFF_KEY] = time.time()
+        log.warning("Schritt 1 ist gespeichert – die Leitung hat JETZT keine "
+                    "VLAN-ID. Marker gesetzt, damit ein Abbruch repariert wird.")
+    else:
+        state.pop(VLAN_OFF_KEY, None)
+        state.pop("vlan_repair_tries", None)
+    save_state(state)
+
+
+def _vid_from_config(config: dict) -> str | None:
+    """Liest die VLAN-ID aus einem aufgenommenen Formular-Abzug."""
+    for f in config.get("fields", []):
+        if (f.get("id") or "") == "vid":
+            return f.get("value")
+    return None
+
+
+def reset_vlan(page, state: dict) -> None:
     """Führt den VLAN-Reset-Zyklus durch: deaktivieren → warten → aktivieren mit ID 7."""
     navigate_to_internet(page)
+    log_wan_row_state(page)
 
     log.info("=== Schritt 1: VLAN-ID deaktivieren ===")
     click_edit(page)
@@ -1133,6 +1276,11 @@ def reset_vlan(page) -> None:
     if DRY_RUN:
         log.info("[DRY-RUN] 30s-Wartezeit übersprungen (kein Toggle erfolgt).")
     else:
+        # (G) Ab hier ist die Leitung ohne VLAN-ID. Der Marker wird VOR der
+        # Wartezeit gesetzt, nicht danach: Wird der Lauf während der 30 s vom
+        # Timer oder von systemd abgeräumt, gibt es kein Except mehr, das ihn
+        # noch setzen könnte.
+        _mark_vlan_off(state, True)
         log.info("Warte 30s damit ISP die VLAN-Session zurücksetzen kann…")
         page.wait_for_timeout(30_000)
 
@@ -1154,6 +1302,20 @@ def reset_vlan(page) -> None:
         handle_config_destroyed(details)
         raise WanConfigDestroyed("WAN-Config direkt nach dem Toggle nicht mehr intakt")
     backup_wan_config(details.get("config", {}), tag="post-toggle")
+
+    # (G) Erst jetzt ist der Toggle wirklich zu Ende. Die Prüfung auf die ID
+    # gehört hierher und NICHT in verify_wan_intact(): Eine fehlende VLAN-ID ist
+    # keine zerstörte Config, sondern ein reparierbarer Halbzustand. Würde sie
+    # dort anschlagen, liefe sie in handle_config_destroyed() und legte den
+    # Watchdog per Kill-Switch still – für etwas, das ein Klick behebt.
+    vid = _vid_from_config(details.get("config", {}))
+    if vid != VLAN_ID:
+        log.error("VLAN-ID nach Schritt 2 ist %r statt %r – Marker bleibt gesetzt, "
+                  "der nächste Lauf repariert.", vid, VLAN_ID)
+        raise WanVlanIncomplete(f"VLAN-ID nach dem Toggle: {vid!r} statt {VLAN_ID!r}")
+
+    log.info("VLAN-ID nach Schritt 2 bestätigt: %s", vid)
+    _mark_vlan_off(state, False)
 
 
 # ─── Hauptprogramm ───────────────────────────────────────────────────────────
@@ -1211,6 +1373,106 @@ def _late_verification(pw) -> None:
             browser.close()
         except Exception:
             pass
+
+
+def _repair_half_toggle(state: dict, now: float) -> None:
+    """(G) Trägt die VLAN-ID nach einem abgebrochenen Toggle wieder ein.
+
+    Läuft in einer FRISCHEN Sitzung. Der Abbruch am 2026-08-11 entstand, weil die
+    Menüspalte der laufenden Sitzung nicht mehr gerendert war; auf derselben
+    Seite weiterzuklicken hätte nur denselben Timeout wiederholt. Der Weg, der
+    nachweislich funktioniert, ist Login → Menü → Formular von vorn.
+
+    set_vlan(enable=True) liest den Ist-Zustand der Checkbox, bevor es klickt.
+    Findet die Reparatur die ID also bereits gesetzt, trägt sie sie nur erneut
+    ein und speichert – sie kann nichts kaputt machen, was schon heil ist.
+    """
+    off_since = state.get(VLAN_OFF_KEY, 0)
+    alter_min = (now - off_since) / 60
+    tries = state.get("vlan_repair_tries", 0) + 1
+    state["vlan_repair_tries"] = tries
+    save_state(state)
+
+    # Zwei Abbruchgründe, die beide dasselbe bedeuten: Es ist nicht der
+    # Menü-Aussetzer, gegen den diese Reparatur gebaut wurde.
+    if now - off_since > VLAN_OFF_MAX_AGE_SEC or tries > VLAN_REPAIR_MAX_TRIES:
+        log.critical("Reparatur wird nicht weiter versucht (Versuch %d, Marker %.0f min alt).",
+                     tries, alter_min)
+        _mark_vlan_off(state, False)
+        _enter_backoff(
+            state, now, "vlan_repair_failed",
+            f"❗ Watchdog: Die VLAN-ID konnte nach einem abgebrochenen Toggle in "
+            f"{tries - 1} Versuchen nicht wiederhergestellt werden.\n\n"
+            f"Die Leitung steht seit {alter_min:.0f} min OHNE VLAN-ID – sie kommt "
+            f"so nicht von allein zurück.\n"
+            f"➡️ Am Router ({ROUTER_URL}) unter Netzwerk → Internet die Verbindung "
+            f"'{WAN_NAME}' bearbeiten, VLAN-ID {VLAN_ID} eintragen und speichern.\n"
+            f"➡️ Prüfen, ob die Verbindung aktiviert ist (Glühbirne ohne rotes "
+            f"Verbotszeichen).\n"
+            f"Forensik: {FORENSIC_DIR}\n"
+            f"Automatik für {ALERT_COOLDOWN_SEC // 3600}h ausgesetzt."
+        )
+        return
+
+    log.warning("Vorheriger Lauf brach nach Schritt 1 ab (vor %.0f min) – die Leitung "
+                "hat keine VLAN-ID. Reparaturversuch %d/%d.",
+                alter_min, tries, VLAN_REPAIR_MAX_TRIES)
+    if tries == 1:
+        send_telegram(
+            f"🔧 Watchdog: Der VLAN-Toggle brach nach dem ersten Schritt ab – die "
+            f"Leitung ist gerade ohne VLAN-ID.\nDie ID wird automatisch wieder "
+            f"eingetragen. Kein Eingriff nötig, solange keine weitere Meldung kommt."
+        )
+
+    with sync_playwright() as pw:
+        browser, context = _new_browser(pw)
+        page = context.new_page()
+        try:
+            login(page)
+            navigate_to_internet(page)
+            log_wan_row_state(page)
+            click_edit(page)
+
+            # Erst nachsehen, dann erst schreiben. Steht die ID schon richtig,
+            # wäre ein Speichern ein zusätzlicher Schreibvorgang ohne jeden
+            # Nutzen – und zwar genau in dem Zustand, in dem am 2026-08-07 auf
+            # ein Speichern das Verwerfen der Zeile folgte. Ohne diese Abfrage
+            # wären es bis zu 3 überflüssige Schreibvorgänge pro Vorfall.
+            ist_vid = page.evaluate("() => document.getElementById('vid')?.value")
+            ist_an = page.locator("#vidEn").is_checked()
+            if ist_an and ist_vid == VLAN_ID:
+                log.info("VLAN-ID steht bereits auf %s und ist aktiv – nichts zu "
+                         "reparieren, es wird NICHT gespeichert.", ist_vid)
+                _mark_vlan_off(state, False)
+                return
+
+            log.info("Reparatur nötig: Checkbox=%s, VLAN-ID=%r (Soll: %s)",
+                     ist_an, ist_vid, VLAN_ID)
+            set_vlan(page, enable=True)
+
+            ok, details = verify_wan_intact(page, "nach Reparatur", deep=True)
+            vid = _vid_from_config(details.get("config", {})) if ok else None
+            if ok and vid == VLAN_ID:
+                log.info("Reparatur erfolgreich – VLAN-ID steht wieder auf %s.", vid)
+                backup_wan_config(details.get("config", {}), tag="post-repair")
+                _mark_vlan_off(state, False)
+                send_telegram(f"✅ VLAN-ID {VLAN_ID} wieder eingetragen. "
+                              f"Die Leitung sollte in Kürze zurückkommen.")
+                return
+            log.error("Reparatur nicht bestätigt (intakt=%s, VLAN-ID=%r) – "
+                      "Marker bleibt, nächster Lauf versucht es erneut.", ok, vid)
+            save_forensics(page, context, "vlan-repair-unbestaetigt")
+        except Exception as e:
+            # Bewusst KEIN Backoff: Genau das hat den Ausfall am 2026-08-11 von
+            # einer Minute auf 2,5 Stunden gedehnt. Der nächste Timer-Lauf in
+            # 5 Minuten versucht es wieder, begrenzt durch VLAN_REPAIR_MAX_TRIES.
+            log.error("Reparatur fehlgeschlagen: %s", e)
+            save_forensics(page, context, "vlan-repair-error")
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def _confirm_wan_missing(pw, phase: str) -> bool:
@@ -1298,7 +1560,11 @@ def run_dry_run() -> None:
             except Exception as e:
                 log.warning("Übersichtszeilen nicht lesbar: %s", e)
 
-            reset_vlan(page)
+            log_wan_row_state(page)
+
+            # Wegwerf-State: Im Dry-Run schreibt save_state() ohnehin nicht, aber
+            # so ist ausgeschlossen, dass ein Probelauf den echten Marker anfasst.
+            reset_vlan(page, {})
             log.info("=== DRY-RUN erfolgreich abgeschlossen – nichts verändert. ===")
         except Exception as e:
             log.error("DRY-RUN gestoppt: %s: %s", type(e).__name__, e)
@@ -1346,7 +1612,7 @@ def main() -> None:
         if st:
             # Nur entwarnen, wenn es vorher wirklich einen Alarm/Backoff gab –
             # ein reiner Karenz-Marker ist kein Vorfall und braucht kein Telegram.
-            if st.get("suppress_until") or st.get("fail_count"):
+            if st.get("suppress_until") or st.get("fail_count") or st.get(VLAN_OFF_KEY):
                 log.info("Verbindung wieder aktiv – hebe Backoff auf.")
                 send_telegram("✅ Glasfaser wieder aktiv – Watchdog-Backoff aufgehoben.")
             else:
@@ -1358,6 +1624,15 @@ def main() -> None:
 
     state = load_state()
     now = time.time()
+
+    # (G) Ein halb ausgeführter Toggle hat Vorrang vor JEDEM Backoff. Das ist der
+    # Kern der Lehre vom 2026-08-11: Solange der Watchdog den Router nicht
+    # angefasst hat, ist Abwarten richtig. Hat er ihn verändert und den Umbau
+    # nicht beendet, ist Abwarten genau falsch – dann hält der Backoff den
+    # selbst verursachten Schaden aufrecht, statt vor Schaden zu schützen.
+    if state.get(VLAN_OFF_KEY):
+        _repair_half_toggle(state, now)
+        return
 
     # Backoff ist das stärkere Gate und wird zuerst geprüft – sonst würde die
     # Karenz-Logik während eines laufenden Backoffs Zustand schreiben und die
@@ -1400,7 +1675,7 @@ def main() -> None:
 
         try:
             login(page)
-            reset_vlan(page)
+            reset_vlan(page, state)
             # Toggle-Zeitpunkt sofort persistieren – ein späterer Lauf braucht ihn,
             # um eine verzögerte Löschung dem Toggle zuordnen zu können.
             state["last_toggle_ts"] = time.time()
@@ -1466,6 +1741,19 @@ def main() -> None:
             save_forensics(page, context, "router-error")
             browser.close()
             state["fail_count"] = state.get("fail_count", 0) + 1
+
+            # (G) Steht der Marker, ist der Abbruch zwischen den beiden
+            # Speichervorgängen passiert und die Leitung hat gerade keine
+            # VLAN-ID. Dann darf hier KEIN Backoff greifen – der nächste Lauf
+            # muss reparieren dürfen. Am 2026-08-11 verhängte genau diese Stelle
+            # 6 h Sperre mit der Meldung „Möglicherweise ein Leitungs-/
+            # Router-Problem", während der Watchdog selbst der Verursacher war.
+            if state.get(VLAN_OFF_KEY):
+                log.warning("Abbruch bei halb ausgeführtem Toggle – kein Backoff, "
+                            "der nächste Lauf repariert die VLAN-ID.")
+                save_state(state)
+                return
+
             if state["fail_count"] >= MAX_RESET_FAILURES:
                 _enter_backoff(
                     state, now, "reset_error",

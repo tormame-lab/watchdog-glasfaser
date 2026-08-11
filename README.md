@@ -51,6 +51,29 @@ Beweislage: **n = 2**, aus Zeitstempeln erschlossen, nie direkt beobachtet, kein
 
 **Warum die Verifikation mehrfach misst**: Die Router-Oberfläche baut die Verbindungstabelle bei jedem Statuswechsel neu auf. Währenddessen ist sie kurz leer — einmal gemessen sah das aus wie eine gelöschte Konfiguration, obwohl 11 Sekunden später alles unverändert dastand. Eine Löschung bleibt bestehen, ein Neuaufbau nicht; deshalb zählt erst ein durchgehend negatives Ergebnis. Ein fester `sleep()` würde genau die interessanten Fälle weiter treffen.
 
+### Der Toggle darf nicht auf halbem Weg stehenbleiben
+
+Der Toggle besteht aus **zwei** Speichervorgängen: VLAN aus, 30 Sekunden warten, VLAN wieder an. Schritt 1 ist sofort wirksam. Bricht der Lauf dazwischen ab, bleibt die Leitung **ohne VLAN-ID** zurück — schlechter als vor dem Eingriff, und sie kommt so nicht von allein wieder.
+
+Genau das ist am 11.08.2026 passiert: Der Menüklick zwischen den beiden Schritten lief 30 Sekunden ins Leere, weil die Menüspalte der Router-Oberfläche nicht gerendert war. Der Lauf brach ab — und der allgemeine Fehlerpfad verhängte 6 Stunden Backoff. Aus einem Aussetzer von einer Minute wurden **2,5 Stunden Ausfall**.
+
+Der Denkfehler steckte in der Fehlerbehandlung, nicht im Klick:
+
+> **Abwarten ist richtig, solange der Watchdog den Router nicht angefasst hat. Hat er ihn verändert und den Umbau nicht beendet, hält Abwarten den selbst verursachten Schaden aufrecht.**
+
+| Schutz | Was er tut |
+|---|---|
+| Marker `vlan_off_since` | wird **vor** der Wartezeit gesetzt — auch ein hart abgeräumter Prozess hinterlässt ihn |
+| Vorrang vor dem Backoff | steht der Marker, startet der Reparaturlauf sofort statt nach 6 h |
+| Reparatur in frischer Sitzung | auf der nicht mehr bedienbaren Seite weiterzuklicken wiederholt nur den Timeout |
+| Erst lesen, dann schreiben | steht die VLAN-ID schon richtig, wird **nicht** gespeichert |
+| VLAN-ID-Prüfung nach Schritt 2 | ein Halbzustand fällt sofort auf, statt unbemerkt zu bleiben |
+| Obergrenzen | 3 Versuche bzw. 6 h Markeralter, dann Alarm statt Endlosschleife |
+
+Die ID-Prüfung sitzt bewusst **nicht** in der Post-Toggle-Verifikation: Eine fehlende VLAN-ID ist keine zerstörte Konfiguration, sondern ein reparierbarer Halbzustand. Dort würde sie den Kill-Switch auslösen und den Watchdog stilllegen — für etwas, das ein Klick behebt.
+
+**Für eigene Anpassungen wichtig**: Die Menüpunkte werden über `text-is` und `:visible` angesprochen, nicht über `has-text`. `has-text` trifft **jedes** Element, in dessen Teilbaum die Zeichenfolge irgendwo vorkommt, auch unsichtbare — im genannten Fall gewann ein ausgeblendeter Hilfetext, in dem zufällig das gesuchte Wort stand.
+
 ### Backoff bei unerwarteten Fehlern
 
 Nicht jeder Ausfall lässt sich durch einen VLAN-Reset beheben. Zwei Fälle werden gesondert behandelt, damit **nicht alle 5 Minuten** vergeblich versucht (und alarmiert) wird:
@@ -110,6 +133,9 @@ Alle Einstellungen über die `.env`-Datei (**niemals committen**, `.gitignore` d
 | `WAN_ROW_PROBES` | `3` | Abtastungen beim Zählen der WAN-Zeilen |
 | `POST_TOGGLE_WINDOW_SEC` | `900` | Fenster, in dem ein Config-Verlust dem Toggle zugerechnet wird |
 | `NOTIFY_FIX_HIT` | `true` | Telegram-Hinweis, wenn ein Neuaufbau abgefangen wurde |
+| `VLAN_REPAIR_MAX_TRIES` | `3` | Reparaturversuche nach abgebrochenem Toggle, dann Alarm |
+| `VLAN_OFF_MAX_AGE_SEC` | `21600` | Ab diesem Markeralter melden statt blind reparieren (6 h) |
+| `MENU_TIMEOUT_MS` | `15000` | Wartezeit auf einen sichtbaren Menüpunkt |
 | `DISABLE_FLAG` | neben dem Skript | Kill-Switch-Datei; existiert sie, greift der Watchdog nicht ein |
 | `FORENSIC_DIR` | `./forensik` | Ablage für Screenshots, Traces und Config-Backups |
 | `KEEP_BACKUPS` | `30` | Anzahl aufbewahrter Config-Backups |
@@ -234,6 +260,29 @@ Evidence: **n = 2**, inferred from timestamps, never directly observed, no repro
 
 **Why verification samples repeatedly**: the router UI rebuilds the connection table on every status change, and it is briefly empty during the rebuild. Measured once, that looked exactly like a deleted configuration — while 11 seconds later everything was still there. A deletion persists, a repaint does not; so only a consistently negative result counts. A fixed `sleep()` would keep hitting precisely the interesting cases.
 
+### The toggle must not stop halfway
+
+The toggle consists of **two** save operations: VLAN off, wait 30 seconds, VLAN back on. Step 1 takes effect immediately. If the run aborts in between, the line is left **without a VLAN ID** — worse than before the intervention, and it will not come back on its own.
+
+That is exactly what happened on 2026-08-11: the menu click between the two steps ran into a 30-second timeout because the router UI's menu column had not rendered. The run aborted — and the generic error path imposed a 6-hour backoff. A one-minute hiccup turned into a **2.5-hour outage**.
+
+The flaw was in the error handling, not in the click:
+
+> **Backing off is right as long as the watchdog has not touched the router. Once it has changed something and failed to finish the job, backing off preserves the damage it caused itself.**
+
+| Safeguard | What it does |
+|---|---|
+| `vlan_off_since` marker | written **before** the wait, so even a hard-killed process leaves it behind |
+| Precedence over backoff | if the marker is set, the repair run starts immediately instead of after 6 h |
+| Repair in a fresh session | clicking on the unresponsive page would only repeat the timeout |
+| Read first, write only if needed | if the VLAN ID is already correct, **nothing** is saved |
+| VLAN ID check after step 2 | a half-applied state surfaces at once instead of going unnoticed |
+| Upper bounds | 3 attempts or a 6 h marker age, then alert instead of an endless loop |
+
+The ID check deliberately does **not** live in the post-toggle verification: a missing VLAN ID is not a destroyed configuration but a repairable half state. There it would trip the kill switch and disable the watchdog — over something a single click fixes.
+
+**Relevant if you adapt this**: menu items are addressed via `text-is` and `:visible`, not `has-text`. `has-text` matches **any** element whose subtree contains the string anywhere, including invisible ones — in the case above a hidden help text that happened to contain the word won.
+
 ### Backoff on unexpected errors
 
 Not every outage can be fixed by a VLAN reset. Two cases are handled specially so the script does **not** keep retrying (and alerting) every 5 minutes:
@@ -293,6 +342,9 @@ All settings live in the `.env` file (**never commit it**; `.gitignore` covers i
 | `WAN_ROW_PROBES` | `3` | Samples when counting WAN rows |
 | `POST_TOGGLE_WINDOW_SEC` | `900` | Window in which a config loss is attributed to the toggle |
 | `NOTIFY_FIX_HIT` | `true` | Telegram note when a table repaint was caught |
+| `VLAN_REPAIR_MAX_TRIES` | `3` | Repair attempts after an aborted toggle, then alert |
+| `VLAN_OFF_MAX_AGE_SEC` | `21600` | Marker age beyond which it alerts instead of repairing blindly (6 h) |
+| `MENU_TIMEOUT_MS` | `15000` | Time to wait for a visible menu item |
 | `DISABLE_FLAG` | next to the script | Kill-switch file; while it exists, the watchdog does not act |
 | `FORENSIC_DIR` | `./forensik` | Storage for screenshots, traces and config backups |
 | `KEEP_BACKUPS` | `30` | Number of config backups retained |
