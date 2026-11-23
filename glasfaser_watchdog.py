@@ -148,6 +148,17 @@ VLAN_OFF_KEY          = "vlan_off_since"
 VLAN_OFF_MAX_AGE_SEC  = _env_int("VLAN_OFF_MAX_AGE_SEC", 6 * 3600)
 VLAN_REPAIR_MAX_TRIES = _env_int("VLAN_REPAIR_MAX_TRIES", 3)
 
+# Grund-Text des Kill-Switches, bei dem die Halbtoggle-Reparatur NICHT laufen
+# darf. Ist die WAN-Zeile ganz verschwunden, gibt es kein Formular, in das eine
+# VLAN-ID einzutragen wäre – ein Reparaturversuch würde dann nur erneut in einen
+# Router klicken, dessen Konfiguration gerade zerstört wurde. Genau davor
+# schützt der Kill-Switch, und das bleibt so.
+#
+# Bei jedem ANDEREN Grund (Sicherheitsabbruch wie ContextMismatch) ist die
+# Reparatur dagegen zwingend: Dort ist die Konfiguration intakt, nur der Umbau
+# hängt auf halber Strecke.
+CONFIG_DESTROYED_REASON = "WAN-Config nach VLAN-Toggle fehlend/unvollständig"
+
 # (D) Bestätigungs-Verifikation. Am 2026-08-07 03:46:39 meldete die Verifikation
 # eine zerstörte WAN-Config, obwohl die Zeile 11 Sekunden später (Forensik-DOM
 # und Screenshot) unverändert und mit Status „Verbunden" dastand: Die Zeilenzahl
@@ -1214,7 +1225,7 @@ def _verify_wan_intact_once(page, phase: str, deep: bool = True) -> tuple[bool, 
 def handle_config_destroyed(details: dict) -> None:
     """(D) Klartext-Alarm + Kill-Switch, damit kein weiterer Schaden entsteht."""
     log.critical("WAN-CONFIG FEHLT NACH TOGGLE – Watchdog wird deaktiviert!")
-    disable_watchdog("WAN-Config nach VLAN-Toggle fehlend/unvollständig")
+    disable_watchdog(CONFIG_DESTROYED_REASON)
     # Grund im Klartext mitschicken: Die Fehlmeldung vom 2026-08-07 nannte
     # „WAN-Zeilen: 1" unter der Überschrift „Config fehlt" und widersprach sich
     # damit selbst. Der eigentliche Fehlschlag lag eine Ebene tiefer.
@@ -1600,8 +1611,48 @@ def main() -> None:
         return
 
     # (D) Kill-Switch – blockiert jeden schreibenden Zugriff.
+    #
+    # ... mit EINER Ausnahme, und die ist am 2026-11-22 teuer bezahlt worden:
+    # Bricht der Watchdog ZWISCHEN den beiden Speichervorgängen ab, setzt der
+    # Sicherheitsabbruch den Kill-Switch – und der stand bis dahin ÜBER der
+    # Halbtoggle-Reparatur. Der Marker war gesetzt, die Reparatur existierte,
+    # sie kam nur nie an die Reihe: `return` kam vorher. Ergebnis: Die Leitung
+    # lag 40 Stunden ohne VLAN-ID da, bis jemand von Hand nachsah.
+    #
+    # Der Kill-Switch soll verhindern, dass der Watchdog WEITEREN Schaden
+    # anrichtet. Er darf nicht verhindern, dass er den Schaden zurücknimmt, den
+    # er selbst gerade angerichtet hat.
+    #
+    # Ausgenommen bleibt der Fall, für den der Kill-Switch ursprünglich gebaut
+    # wurde: Ist die WAN-Zeile verschwunden, gibt es nichts zu reparieren, und
+    # ein Klick in diesen Router ist genau das, wovor geschützt werden soll.
     reason = watchdog_disabled()
     if reason:
+        state = load_state()
+        halb_offen = bool(state.get(VLAN_OFF_KEY))
+        config_zerstoert = CONFIG_DESTROYED_REASON in reason
+
+        if halb_offen and not config_zerstoert:
+            if is_glasfaser_active():
+                log.info("Watchdog ist DEAKTIVIERT (%s), aber die Glasfaser läuft "
+                         "wieder – Halbtoggle-Marker war gegenstandslos und wird "
+                         "gelöscht. Kein Zugriff auf den Router.", reason)
+                _mark_vlan_off(state, False)
+                return
+
+            log.critical("Watchdog ist DEAKTIVIERT (%s) – ABER ein Toggle hängt auf "
+                         "halber Strecke und die Leitung hat keine VLAN-ID. Die "
+                         "Reparatur läuft trotzdem; der Kill-Switch bleibt gesetzt.",
+                         reason)
+            _repair_half_toggle(state, time.time())
+            return
+
+        if halb_offen and config_zerstoert:
+            log.critical("Watchdog ist DEAKTIVIERT (%s). Halbtoggle-Marker ist zwar "
+                         "gesetzt, aber die WAN-Zeile fehlt – es gibt kein Formular "
+                         "zu reparieren. KEIN Eingriff.", reason)
+            return
+
         log.critical("Watchdog ist DEAKTIVIERT (%s). Kein Eingriff. "
                      "Zum Reaktivieren: rm %s", reason, DISABLE_FLAG)
         return

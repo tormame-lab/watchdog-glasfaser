@@ -72,6 +72,18 @@ Der Denkfehler steckte in der Fehlerbehandlung, nicht im Klick:
 
 Die ID-Prüfung sitzt bewusst **nicht** in der Post-Toggle-Verifikation: Eine fehlende VLAN-ID ist keine zerstörte Konfiguration, sondern ein reparierbarer Halbzustand. Dort würde sie den Kill-Switch auslösen und den Watchdog stilllegen — für etwas, das ein Klick behebt.
 
+#### Die Reparatur steht über dem Kill-Switch
+
+Am 22.11.2026 brach der Watchdog **zwischen** den beiden Speichervorgängen ab. Der Halbzustands-Marker war gesetzt, die Reparatur gebaut — sie kam trotzdem nie an die Reihe, weil der Sicherheitsabbruch den Kill-Switch setzte und dessen Prüfung in `main()` **darüber** stand. Die Leitung lag 40 Stunden ohne VLAN-ID da.
+
+Der Kill-Switch soll verhindern, dass der Watchdog **weiteren** Schaden anrichtet. Er darf nicht verhindern, dass er den Schaden zurücknimmt, den er **selbst gerade** angerichtet hat. Seither läuft die Reparatur auch bei gesetztem Kill-Switch — mit drei Einschränkungen:
+
+| Bedingung | Grund |
+|---|---|
+| **Nicht**, wenn der Kill-Switch wegen zerstörter WAN-Config gesetzt wurde | Dann gibt es kein Formular zu reparieren — und genau davor schützt er |
+| **Nicht**, wenn die Leitung ohnehin wieder läuft | Marker wird gelöscht, der Router gar nicht erst angefasst |
+| Der Kill-Switch **bleibt gesetzt** | Die Reparatur holt die Leitung zurück, schärft den Watchdog aber nicht wieder |
+
 **Für eigene Anpassungen wichtig**: Die Menüpunkte werden über `text-is` und `:visible` angesprochen, nicht über `has-text`. `has-text` trifft **jedes** Element, in dessen Teilbaum die Zeichenfolge irgendwo vorkommt, auch unsichtbare — im genannten Fall gewann ein ausgeblendeter Hilfetext, in dem zufällig das gesuchte Wort stand.
 
 ### Backoff bei unerwarteten Fehlern
@@ -280,6 +292,18 @@ The flaw was in the error handling, not in the click:
 | Upper bounds | 3 attempts or a 6 h marker age, then alert instead of an endless loop |
 
 The ID check deliberately does **not** live in the post-toggle verification: a missing VLAN ID is not a destroyed configuration but a repairable half state. There it would trip the kill switch and disable the watchdog — over something a single click fixes.
+
+#### The repair outranks the kill switch
+
+On 2026-11-22 the watchdog aborted **between** the two save operations. The half-state marker was set and the repair existed — yet it never ran, because the safety abort set the kill switch and that check sat **above** it in `main()`. The line stayed without a VLAN ID for 40 hours.
+
+The kill switch exists to stop the watchdog from doing **further** damage. It must not stop it from undoing damage it **just caused itself**. Since then the repair also runs while the kill switch is set — with three limits:
+
+| Condition | Reason |
+|---|---|
+| **Not** if the kill switch was set for a destroyed WAN config | There is no form to repair — and that is exactly what it guards against |
+| **Not** if the line is already back up | The marker is cleared and the router is never touched |
+| The kill switch **stays set** | The repair restores the line; it does not re-arm the watchdog |
 
 **Relevant if you adapt this**: menu items are addressed via `text-is` and `:visible`, not `has-text`. `has-text` matches **any** element whose subtree contains the string anywhere, including invisible ones — in the case above a hidden help text that happened to contain the word won.
 
